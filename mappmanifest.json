@@ -1,0 +1,14 @@
+{
+  "id": "hello-mapp",
+  "name": "Hello Mapphub",
+  "version": "0.1.0",
+  "author": "mapphub",
+  "description": "Starter mini-app template",
+  "icon": "icon.svg",
+  "permissions": [],
+  "web": true,
+  "routes": {
+    "root": "/",
+    "app": "/index.html"
+  }
+}
