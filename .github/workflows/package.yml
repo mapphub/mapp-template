@@ -1,0 +1,41 @@
+name: Package mini-app
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build dist
+        run: |
+          mkdir -p dist
+          cp -r index.html app.js style.css miniapps-bridge.js mappmanifest.json icon.svg dist/ 2>/dev/null || true
+          if [ -d public ]; then cp -r public/* dist/; fi
+          cd dist && zip -r ../app.zip .
+      - name: Release zip
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.run_number }}
+          files: app.zip
+          name: Build ${{ github.run_number }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Detect web flag
+        id: web
+        run: |
+          WEB=$(python3 -c "import json;print('true' if json.load(open('mappmanifest.json')).get('web') else 'false')")
+          echo "enabled=$WEB" >> $GITHUB_OUTPUT
+      - if: steps.web.outputs.enabled == 'true'
+        uses: actions/configure-pages@v5
+      - if: steps.web.outputs.enabled == 'true'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+      - if: steps.web.outputs.enabled == 'true'
+        uses: actions/deploy-pages@v4

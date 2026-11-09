@@ -1,0 +1,22 @@
+name: Validate manifest
+on:
+  pull_request:
+    branches: [main]
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check mappmanifest.json
+        run: |
+          test -f mappmanifest.json
+          test -f miniapps-bridge.js
+          python3 - <<'PY'
+          import json,sys,re
+          m=json.load(open('mappmanifest.json'))
+          for k in ('id','name','version','author'):
+            if not m.get(k): raise SystemExit(f'missing {k}')
+          if not re.match(r'^[a-z0-9][a-z0-9._-]{0,63}$', m['id']):
+            raise SystemExit('id must be lowercase slug')
+          print('ok', m['id'], m['version'], m['author'])
+          PY
