@@ -1,0 +1,115 @@
+name: Gateway publish
+on:
+  pull_request_target:
+    types: [opened, synchronize]
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # Requires org secret ORG_ADMIN_TOKEN with admin on mapphub/* and mapphub.github.io
+    steps:
+      - name: Checkout PR head (untrusted code only for packaging paths)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+
+      - name: Resolve identity
+        id: meta
+        run: |
+          set -euo pipefail
+          AUTHOR="${{ github.actor }}"
+          NAME="${{ github.event.pull_request.head.ref }}"
+          # sanitize name
+          NAME=$(echo "$NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]/-/g' | cut -c1-40)
+          VERSION=$(jq -r '.version // "0.0.1"' package.json)
+          echo "author=$AUTHOR" >> "$GITHUB_OUTPUT"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "repo=app-${AUTHOR}-${NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Patch manifest with author/name/version
+        run: |
+          set -euo pipefail
+          MAN=mapp/mapp.manifest.json
+          test -f "$MAN"
+          jq --arg a "${{ steps.meta.outputs.author }}" \
+             --arg n "${{ steps.meta.outputs.name }}" \
+             --arg v "${{ steps.meta.outputs.version }}" \
+             '.author=$a | .id=($a+"."+$n) | .name=$n | .version=$v' "$MAN" > /tmp/man.json
+          mv /tmp/man.json "$MAN"
+          # also emit canonical name for shell
+          cp "$MAN" mapp/mappmanifest.json
+
+      - name: Create or update app repo + release + catalog
+        env:
+          GH_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
+          AUTHOR: ${{ steps.meta.outputs.author }}
+          NAME: ${{ steps.meta.outputs.name }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          APP_REPO: ${{ steps.meta.outputs.repo }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "ORG_ADMIN_TOKEN not set — skip remote publish"
+            exit 0
+          fi
+          # Ensure actor matches author field
+          MAN_AUTHOR=$(jq -r '.author' mapp/mapp.manifest.json)
+          if [ "$MAN_AUTHOR" != "$AUTHOR" ]; then
+            echo "author mismatch"; exit 1
+          fi
+          # Create repo if missing
+          gh repo view "mapphub/$APP_REPO" >/dev/null 2>&1 || \
+            gh repo create "mapphub/$APP_REPO" --public --description "Mini-app $NAME by $AUTHOR"
+          rm -rf /tmp/app-repo
+          gh repo clone "mapphub/$APP_REPO" /tmp/app-repo -- --depth 1 || true
+          mkdir -p /tmp/app-repo
+          rsync -a --delete mapp/ /tmp/app-repo/mapp/
+          cp package.json /tmp/app-repo/ 2>/dev/null || true
+          cd /tmp/app-repo
+          git config user.name "$AUTHOR"
+          git config user.email "$AUTHOR@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet || git commit -m "release $VERSION from PR"
+          git push "https://x-access-token:${GH_TOKEN}@github.com/mapphub/${APP_REPO}.git" HEAD:main
+
+          # Package ZIP of mapp/
+          (cd mapp && zip -r -q ../app.zip .)
+          TAG="v${VERSION}"
+          gh release delete latest -y 2>/dev/null || true
+          gh release create latest app.zip --title "$NAME $VERSION" --notes "Auto release" || \
+            gh release upload latest app.zip --clobber
+          if echo "$VERSION" | grep -Eq '^[0-9]+\.0\.0$'; then
+            gh release create "$TAG" app.zip --title "$NAME $TAG" --notes "Major $TAG" 2>/dev/null || true
+          fi
+
+          # Catalog update
+          rm -rf /tmp/site
+          gh repo clone mapphub/mapphub.github.io /tmp/site -- --depth 1
+          PKG="https://github.com/mapphub/${APP_REPO}/releases/latest/download/app.zip"
+          jq --arg id "$AUTHOR.$NAME" --arg name "$NAME" --arg ver "$VERSION" \
+             --arg author "$AUTHOR" --arg repo "https://github.com/mapphub/$APP_REPO" \
+             --arg pkg "$PKG" \
+             '
+             .apps = ((.apps // []) | map(select(.name != $name or .author != $author))) +
+               [{id:$id, name:$name, version:$ver, description:"", author:$author, repo:$repo,
+                 packageUrl:$pkg, releaseUrl:$pkg, permissions:[], official:false}]
+             ' /tmp/site/catalog.json > /tmp/catalog.json
+          mv /tmp/catalog.json /tmp/site/catalog.json
+          cd /tmp/site
+          git config user.name mapphub-bot
+          git config user.email bot@mapphub.local
+          git add catalog.json
+          git commit -m "catalog: $AUTHOR.$NAME@$VERSION" || true
+          git push
+
+      - name: Comment PR
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BODY="Gateway: author=${{ steps.meta.outputs.author }} name=${{ steps.meta.outputs.name }} version=${{ steps.meta.outputs.version }} repo=mapphub/${{ steps.meta.outputs.repo }}"
+          gh pr comment ${{ github.event.pull_request.number }} --body "$BODY" || true

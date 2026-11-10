@@ -1,0 +1,11 @@
+{
+  "id": "hello",
+  "name": "Hello World",
+  "version": "1.0.0",
+  "description": "Стартовый шаблон Mapphub",
+  "icon": "icon.svg",
+  "routes": { "root": "public", "app": "public", "client": "public" },
+  "server": { "host": true, "client": true, "network": true },
+  "permissions": ["net", "notify"],
+  "tags": ["template"]
+}
