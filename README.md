@@ -1,12 +1,23 @@
 # mapp-template
 
-Шаблон мини-приложения Mapphub.
+## API
 
-1. Fork → ветка с именем приложения
-2. Соберите статику в `mapp/public/`
-3. Обновите `package.json` → `version`
-4. PR в `mapphub/mapp-template` (ветка = имя приложения)
+```js
+await MiniApp.apps('list', {})
+await MiniApp.notify('toast', { text: 'hi' })
+await MiniApp.net('send', { text: 'msg' })
+```
 
-Gateway создаст `mapphub/app-<author>-<name>`, релиз ZIP и запись в catalog.
+`MiniApp` — прокси: `MiniApp.<category>(action, params)`.
+Алиас `MiniApps` сохранён для совместимости.
+
+## Структура
+
+```
+mapp/
+  mapp.manifest.json
+  icon.svg
+  public/
+```
 
 Документация: https://mapphub.github.io/docs/
