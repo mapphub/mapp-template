@@ -14,7 +14,7 @@ jobs:
       - name: Author + base checks
         id: gate
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
         run: |
           set -euo pipefail
           PR_AUTHOR="${{ github.event.pull_request.user.login }}"
@@ -40,6 +40,7 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           repository: ${{ github.event.pull_request.head.repo.full_name }}
+          token: ${{ secrets.ORG_ADMIN_TOKEN }}
 
       - name: Publish (repo releases + catalog; no portal packages)
         if: steps.gate.outputs.reject != 'true'
@@ -113,7 +114,6 @@ jobs:
               --title "${NAME} v${VERSION}" --notes "Major ${VERSION}" 2>/dev/null || true
           fi
 
-          # Portal: catalog only
           WEB_URL="https://mapphub.github.io/apps/$(echo "$APP_ID" | tr '.' '-')/"
           NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           rm -rf /tmp/site
@@ -134,7 +134,7 @@ jobs:
       - name: Comment
         if: always() && steps.gate.outputs.reject != 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
         run: |
           gh pr comment ${{ github.event.pull_request.number }} --repo ${{ github.repository }} \
             --body "✅ Опубликовано: релизы в mapphub/__APP_REPO__, catalog на портале." || true
