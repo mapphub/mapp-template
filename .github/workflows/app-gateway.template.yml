@@ -1,0 +1,175 @@
+name: App gateway
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: write
+  pull-requests: write
+# Managed by mapphub — developers cannot replace this workflow via PR content.
+# Placeholders: __OWNER_LOGIN__ __APP_NAME__ __APP_REPO__ __APP_ID__
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Author + base checks
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          PR_AUTHOR="${{ github.event.pull_request.user.login }}"
+          BASE="${{ github.event.pull_request.base.ref }}"
+          OWNER="__OWNER_LOGIN__"
+          if [ "$PR_AUTHOR" != "$OWNER" ]; then
+            gh pr comment ${{ github.event.pull_request.number }} --repo ${{ github.repository }} \
+              --body "❌ Только автор приложения (\`$OWNER\`) может публиковать обновления."
+            echo "reject=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$BASE" != "main" ]; then
+            gh pr comment ${{ github.event.pull_request.number }} --repo ${{ github.repository }} \
+              --body "❌ PR в репозиторий приложения принимаются **только в main**."
+            echo "reject=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "reject=false" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout PR head
+        if: steps.gate.outputs.reject != 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+
+      - name: Publish (manifest, main, pages, releases, portal)
+        if: steps.gate.outputs.reject != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
+          PUBLIC_SITE_TOKEN: ${{ secrets.PUBLIC_SITE_TOKEN }}
+          AUTHOR: "__OWNER_LOGIN__"
+          NAME: "__APP_NAME__"
+          APP_REPO: "__APP_REPO__"
+          APP_ID: "__APP_ID__"
+        run: |
+          set -euo pipefail
+          test -n "${GH_TOKEN:-}"
+          VERSION=$(jq -r '.version // empty' package.json)
+          test -n "$VERSION"
+
+          MAN=mapp/mapp.manifest.json
+          mkdir -p mapp
+          [ -f "$MAN" ] || echo '{}' > "$MAN"
+          jq --arg a "$AUTHOR" --arg n "$NAME" --arg v "$VERSION" --arg id "$APP_ID" \
+            '.author=$a | .id=$id | .name=$n | .version=$v | .official=false' "$MAN" > /tmp/man.json
+          mv /tmp/man.json "$MAN"
+
+          # Rebuild controlled workflow only (strip anything user tried to add)
+          rm -rf .github
+          mkdir -p .github/workflows
+          # app-gateway.yml is restored from the copy already on main after rsync from clone
+
+          rm -rf /tmp/app-repo
+          git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/mapphub/${APP_REPO}.git" /tmp/app-repo
+          # Preserve managed workflow from current main
+          cp /tmp/app-repo/.github/workflows/app-gateway.yml /tmp/app-gateway.yml
+          rsync -a --delete --exclude '.git' --exclude '.github' ./ /tmp/app-repo/
+          mkdir -p /tmp/app-repo/.github/workflows
+          cp /tmp/app-gateway.yml /tmp/app-repo/.github/workflows/app-gateway.yml
+
+          cd /tmp/app-repo
+          git config user.name "$AUTHOR"
+          git config user.email "${AUTHOR}@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet || git commit -m "release ${VERSION}"
+          git push "https://x-access-token:${GH_TOKEN}@github.com/mapphub/${APP_REPO}.git" HEAD:main
+
+          WWW=$(jq -r '.routes.www // .routes.app // "public"' mapp/mapp.manifest.json)
+          SRC="mapp/${WWW}"
+          if [ -d "$SRC" ] && [ -f "$SRC/index.html" ]; then
+            rm -rf /tmp/ghp && mkdir -p /tmp/ghp
+            cp -a "$SRC"/. /tmp/ghp/
+            cd /tmp/ghp
+            git init && git checkout -b gh-pages
+            git config user.name "$AUTHOR"
+            git config user.email "${AUTHOR}@users.noreply.github.com"
+            git add -A && git commit -m "pages ${VERSION}"
+            git push -f "https://x-access-token:${GH_TOKEN}@github.com/mapphub/${APP_REPO}.git" gh-pages
+            gh api -X PUT "repos/mapphub/${APP_REPO}/pages" -f build_type=legacy -f source[branch]=gh-pages -f source[path]=/ 2>/dev/null || \
+              gh api -X POST "repos/mapphub/${APP_REPO}/pages" -f build_type=legacy -f source[branch]=gh-pages -f source[path]=/ 2>/dev/null || true
+          fi
+
+          cd /tmp/app-repo
+          (cd mapp && zip -r -q ../app.zip .)
+          PREV_BODY=$(gh release view latest -R "mapphub/${APP_REPO}" --json body -q .body 2>/dev/null || echo "")
+          PREV_VER=$(echo "$PREV_BODY" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo "")
+          MAJOR_PREV=$(echo "$PREV_VER" | cut -d. -f1)
+          MAJOR_NEW=$(echo "$VERSION" | cut -d. -f1)
+
+          gh release delete latest -R "mapphub/${APP_REPO}" -y 2>/dev/null || true
+          gh release create latest app.zip -R "mapphub/${APP_REPO}" \
+            --title "${NAME} ${VERSION}" --notes "version ${VERSION}" --latest
+
+          if [ -n "$PREV_VER" ] && [ "$MAJOR_NEW" != "$MAJOR_PREV" ]; then
+            gh release create "v${VERSION}" app.zip -R "mapphub/${APP_REPO}" \
+              --title "${NAME} v${VERSION} (major)" --notes "Major release ${VERSION}" 2>/dev/null || true
+          elif echo "$VERSION" | grep -Eq '^[0-9]+\.0\.0$'; then
+            gh release create "v${VERSION}" app.zip -R "mapphub/${APP_REPO}" \
+              --title "${NAME} v${VERSION}" --notes "Major ${VERSION}" 2>/dev/null || true
+          fi
+
+          TOKEN="${PUBLIC_SITE_TOKEN:-$GH_TOKEN}"
+          SAFE_ID=$(echo "$APP_ID" | tr '.' '-')
+          PKG_URL="https://github.com/mapphub/${APP_REPO}/releases/latest/download/app.zip"
+          WEB_URL="https://mapphub.github.io/apps/${SAFE_ID}/"
+          NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+          CONTENT=$(base64 -w0 app.zip)
+          API="https://api.github.com/repos/mapphub/mapphub.github.io/contents/packages/${SAFE_ID}.zip"
+          SHA=$(curl -fsSL -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" "$API" 2>/dev/null | jq -r '.sha // empty' || true)
+          BODY=$(jq -n --arg m "package ${APP_ID}@${VERSION}" --arg c "$CONTENT" --arg s "$SHA" \
+            '{message:$m, content:$c} + (if $s != "" then {sha:$s} else {} end)')
+          curl -fsSL -X PUT -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" -d "$BODY" "$API" >/dev/null || true
+
+          rm -rf /tmp/site
+          git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/mapphub/mapphub.github.io.git" /tmp/site
+
+          jq --arg id "$APP_ID" --arg name "$NAME" --arg ver "$VERSION" \
+             --arg author "$AUTHOR" --arg repo "https://github.com/mapphub/${APP_REPO}" \
+             --arg pkg "$PKG_URL" --arg web "$WEB_URL" --arg now "$NOW" \
+             '.updatedAt=$now | .apps=((.apps//[])|map(select(.id!=$id)))+[{id:$id,name:$name,version:$ver,description:"",author:$author,repo:$repo,packageUrl:$pkg,releaseUrl:$pkg,webUrl:$web,official:false}]' \
+             /tmp/site/catalog.json > /tmp/catalog.json
+          mv /tmp/catalog.json /tmp/site/catalog.json
+
+          mkdir -p /tmp/site/releases/apps
+          HIST="/tmp/site/releases/apps/${SAFE_ID}.json"
+          if [ -f "$HIST" ]; then
+            jq --arg ver "$VERSION" --arg url "$PKG_URL" --arg now "$NOW" \
+              '.releases=([{version:$ver,tag:"latest",url:$url,publishedAt:$now}]+(.releases//[]))|unique_by(.version)|.latest=$ver|.updatedAt=$now' \
+              "$HIST" > /tmp/hist.json
+          else
+            jq -n --arg id "$APP_ID" --arg name "$NAME" --arg author "$AUTHOR" \
+                  --arg ver "$VERSION" --arg url "$PKG_URL" --arg now "$NOW" \
+              '{id:$id,name:$name,author:$author,latest:$ver,updatedAt:$now,releases:[{version:$ver,tag:"latest",url:$url,publishedAt:$now}]}' \
+              > /tmp/hist.json
+          fi
+          mv /tmp/hist.json "$HIST"
+
+          mkdir -p /tmp/site/releases
+          [ -f /tmp/site/releases/index.json ] || echo '{"platforms":{"android":{"file":"releases/android.json"},"apps":{"dir":"releases/apps/"}},"updatedAt":""}' > /tmp/site/releases/index.json
+          jq --arg now "$NOW" '.updatedAt=$now' /tmp/site/releases/index.json > /tmp/idx.json && mv /tmp/idx.json /tmp/site/releases/index.json
+
+          cd /tmp/site
+          git config user.name "$AUTHOR"
+          git config user.email "${AUTHOR}@users.noreply.github.com"
+          git add catalog.json releases/
+          git diff --cached --quiet || git commit -m "release: ${APP_ID}@${VERSION}"
+          git push
+
+      - name: Comment
+        if: always() && steps.gate.outputs.reject != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr comment ${{ github.event.pull_request.number }} --repo ${{ github.repository }} \
+            --body "✅ Опубликовано в mapphub/__APP_REPO__ (latest). PR в app-репозиторий не мержится — изменения применены скриптом." || true
