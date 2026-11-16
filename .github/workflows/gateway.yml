@@ -34,7 +34,6 @@ jobs:
           fi
           echo "reject=false" >> "$GITHUB_OUTPUT"
 
-      # Checkout base (trusted) for workflow templates, then PR head for app content
       - name: Checkout template (trusted workflows)
         if: steps.gate.outputs.reject != 'true'
         uses: actions/checkout@v4
@@ -88,13 +87,17 @@ jobs:
           if [ ! -f "$MAN" ]; then
             echo '{"routes":{"root":"public","app":"public","client":"public","www":"public"}}' > "$MAN"
           fi
+          # Update check URL points at this app's manifest in its own repo
+          MANIFEST_URL="https://raw.githubusercontent.com/mapphub/${APP_REPO}/main/mapp/mapp.manifest.json"
+          PKG_URL="https://github.com/mapphub/${APP_REPO}/releases/latest/download/app.zip"
           jq --arg a "$AUTHOR" --arg n "$NAME" --arg v "$VERSION" --arg id "$APP_ID" \
-            '.author=$a | .id=$id | .name=$n | .version=$v | .official=false' \
+             --arg mu "$MANIFEST_URL" --arg pu "$PKG_URL" --arg repo "https://github.com/mapphub/${APP_REPO}" \
+            '.author=$a | .id=$id | .name=$n | .version=$v | .official=false
+             | .update = {manifestUrl:$mu, packageUrl:$pu, repo:$repo}' \
             "$MAN" > /tmp/man.json
           mv /tmp/man.json "$MAN"
           cp "$MAN" /tmp/payload/mapp/mappmanifest.json
 
-          # Only controlled workflow — from trusted template
           mkdir -p /tmp/payload/.github/workflows
           TPL=_template/.github/workflows/app-gateway.template.yml
           test -f "$TPL"
@@ -104,15 +107,10 @@ jobs:
               -e "s/__APP_ID__/${APP_ID}/g" \
               "$TPL" > /tmp/payload/.github/workflows/app-gateway.yml
 
-          echo "payload ready:"
-          cat "$MAN"
-          ls -la /tmp/payload/.github/workflows/
-
-      - name: Create/update app repo + pages + releases + portal
+      - name: Create/update app repo + pages + GitHub releases + catalog only
         if: steps.gate.outputs.reject != 'true'
         env:
           GH_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
-          PUBLIC_SITE_TOKEN: ${{ secrets.PUBLIC_SITE_TOKEN }}
           AUTHOR: ${{ steps.meta.outputs.author }}
           NAME: ${{ steps.meta.outputs.name }}
           VERSION: ${{ steps.meta.outputs.version }}
@@ -143,7 +141,6 @@ jobs:
           git diff --cached --quiet || git commit -m "release ${VERSION}"
           git push -u "https://x-access-token:${GH_TOKEN}@github.com/mapphub/${APP_REPO}.git" HEAD:main
 
-          # gh-pages from routes.www (default public)
           WWW=$(jq -r '.routes.www // .routes.app // "public"' mapp/mapp.manifest.json)
           SRC="mapp/${WWW}"
           if [ -d "$SRC" ] && [ -f "$SRC/index.html" ]; then
@@ -159,11 +156,9 @@ jobs:
               gh api -X POST "repos/mapphub/${APP_REPO}/pages" -f build_type=legacy -f source[branch]=gh-pages -f source[path]=/ 2>/dev/null || true
           fi
 
-          # Releases: always refresh latest; major bump → versioned release
+          # Releases ONLY on the mini-app repository (not portal packages)
           cd /tmp/app-repo
           (cd mapp && zip -r -q ../app.zip .)
-          ls -lh app.zip
-
           PREV_BODY=$(gh release view latest -R "mapphub/${APP_REPO}" --json body -q .body 2>/dev/null || echo "")
           PREV_VER=$(echo "$PREV_BODY" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo "")
           MAJOR_PREV=$(echo "$PREV_VER" | cut -d. -f1)
@@ -181,72 +176,30 @@ jobs:
               --title "${NAME} v${VERSION}" --notes "Major ${VERSION}" 2>/dev/null || true
           fi
 
-          # Portal: package + catalog + release history
-          TOKEN="${PUBLIC_SITE_TOKEN:-$GH_TOKEN}"
-          SAFE_ID=$(echo "$APP_ID" | tr '.' '-')
+          # Portal: catalog.json only (no zip upload, no per-app release history files)
           PKG_URL="https://github.com/mapphub/${APP_REPO}/releases/latest/download/app.zip"
-          WEB_URL="https://mapphub.github.io/apps/${SAFE_ID}/"
+          MANIFEST_URL="https://raw.githubusercontent.com/mapphub/${APP_REPO}/main/mapp/mapp.manifest.json"
+          WEB_URL="https://mapphub.github.io/apps/$(echo "$APP_ID" | tr '.' '-')/"
           NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-
-          CONTENT=$(base64 -w0 app.zip)
-          API="https://api.github.com/repos/mapphub/mapphub.github.io/contents/packages/${SAFE_ID}.zip"
-          SHA=$(curl -fsSL -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" "$API" 2>/dev/null | jq -r '.sha // empty' || true)
-          BODY=$(jq -n --arg m "package ${APP_ID}@${VERSION}" --arg c "$CONTENT" --arg s "$SHA" \
-            '{message:$m, content:$c} + (if $s != "" then {sha:$s} else {} end)')
-          curl -fsSL -X PUT -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" \
-            -H "Content-Type: application/json" -d "$BODY" "$API" >/dev/null || echo "package soft-fail"
 
           rm -rf /tmp/site
           git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/mapphub/mapphub.github.io.git" /tmp/site
 
           jq --arg id "$APP_ID" --arg name "$NAME" --arg ver "$VERSION" \
              --arg author "$AUTHOR" --arg repo "https://github.com/mapphub/${APP_REPO}" \
-             --arg pkg "$PKG_URL" --arg web "$WEB_URL" --arg now "$NOW" \
-             '.updatedAt=$now | .apps=((.apps//[])|map(select(.id!=$id)))+[{id:$id,name:$name,version:$ver,description:"",author:$author,repo:$repo,packageUrl:$pkg,releaseUrl:$pkg,webUrl:$web,official:false}]' \
+             --arg pkg "$PKG_URL" --arg mu "$MANIFEST_URL" --arg web "$WEB_URL" --arg now "$NOW" \
+             '.updatedAt=$now | .apps=((.apps//[])|map(select(.id!=$id)))+[{id:$id,name:$name,version:$ver,description:"",author:$author,repo:$repo,packageUrl:$pkg,releaseUrl:$pkg,manifestUrl:$mu,webUrl:$web,official:false}]' \
              /tmp/site/catalog.json > /tmp/catalog.json
           mv /tmp/catalog.json /tmp/site/catalog.json
-
-          mkdir -p /tmp/site/releases/apps
-          HIST="/tmp/site/releases/apps/${SAFE_ID}.json"
-          if [ -f "$HIST" ]; then
-            jq --arg ver "$VERSION" --arg url "$PKG_URL" --arg now "$NOW" \
-              '.releases=([{version:$ver,tag:"latest",url:$url,publishedAt:$now}]+(.releases//[])) | .releases |= unique_by(.version) | .latest=$ver | .updatedAt=$now' \
-              "$HIST" > /tmp/hist.json
-          else
-            jq -n --arg id "$APP_ID" --arg name "$NAME" --arg author "$AUTHOR" \
-                  --arg ver "$VERSION" --arg url "$PKG_URL" --arg now "$NOW" \
-              '{id:$id,name:$name,author:$author,latest:$ver,updatedAt:$now,releases:[{version:$ver,tag:"latest",url:$url,publishedAt:$now}]}' \
-              > /tmp/hist.json
-          fi
-          mv /tmp/hist.json "$HIST"
-
-          mkdir -p /tmp/site/releases
-          if [ ! -f /tmp/site/releases/index.json ]; then
-            cat > /tmp/site/releases/index.json <<'JSON'
-          {
-            "platforms": {
-              "android": { "file": "releases/android.json", "description": "Shell APK updates" },
-              "apps": { "dir": "releases/apps/", "description": "Mini-app release histories" }
-            },
-            "updatedAt": ""
-          }
-          JSON
-          fi
-          jq --arg now "$NOW" '.updatedAt=$now' /tmp/site/releases/index.json > /tmp/idx.json
-          mv /tmp/idx.json /tmp/site/releases/index.json
-
-          if [ ! -f /tmp/site/releases/android.json ] && [ -f /tmp/site/update.json ]; then
-            jq '{platform:"android"} + .' /tmp/site/update.json > /tmp/site/releases/android.json
-          fi
 
           cd /tmp/site
           git config user.name "$AUTHOR"
           git config user.email "${AUTHOR}@users.noreply.github.com"
-          git add catalog.json releases/
-          git diff --cached --quiet || git commit -m "release: ${APP_ID}@${VERSION}"
+          git add catalog.json
+          git diff --cached --quiet || git commit -m "catalog: ${APP_ID}@${VERSION}"
           git push
 
-          echo "OK mapphub/${APP_REPO} ${APP_ID}@${VERSION}"
+          echo "OK mapphub/${APP_REPO} ${APP_ID}@${VERSION} (releases in app repo; catalog only on portal)"
 
       - name: Comment PR result
         if: always() && steps.gate.outputs.reject != 'true'
@@ -255,21 +208,19 @@ jobs:
         run: |
           set -euo pipefail
           A="${{ steps.meta.outputs.author }}"
-          N="${{ steps.meta.outputs.name }}"
           V="${{ steps.meta.outputs.version }}"
           R="${{ steps.meta.outputs.repo }}"
           ID="${{ steps.meta.outputs.id }}"
-          SAFE=$(echo "$ID" | tr '.' '-')
           BODY="✅ **Gateway**
 
           | | |
           |---|---|
           | Репозиторий | https://github.com/mapphub/${R} |
           | id | \`${ID}\` |
-          | version | \`${V}\` (package.json) |
-          | author | \`${A}\` |
-          | Пакет | https://github.com/mapphub/${R}/releases/latest/download/app.zip |
-          | История | https://mapphub.github.io/releases/apps/${SAFE}.json |
+          | version | \`${V}\` |
+          | Пакет (релиз) | https://github.com/mapphub/${R}/releases/latest/download/app.zip |
+          | Манифест (обновления) | https://raw.githubusercontent.com/mapphub/${R}/main/mapp/mapp.manifest.json |
+          | Каталог | https://mapphub.github.io/catalog.json |
 
-          PR **не мержится** в шаблон. Дальше: PR **в main** репозитория \`mapphub/${R}\` (только \`${A}\`)."
+          Релизы хранятся **только** в репозитории приложения. На портал уходит запись в catalog.json."
           gh pr comment ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --body "$BODY" || true
