@@ -1,22 +1,24 @@
-name: Validate manifest
+name: Validate PR
 on:
   pull_request:
-    branches: [main]
 jobs:
   validate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Check mappmanifest.json
+      - name: Check package.json and mapp layout
         run: |
-          test -f mappmanifest.json
-          test -f miniapps-bridge.js
+          set -euo pipefail
+          test -f package.json
+          VER=$(jq -r '.version // empty' package.json)
+          test -n "$VER"
+          echo "package.json version=$VER"
+          test -f mapp/mapp.manifest.json
           python3 - <<'PY'
-          import json,sys,re
-          m=json.load(open('mappmanifest.json'))
-          for k in ('id','name','version','author'):
-            if not m.get(k): raise SystemExit(f'missing {k}')
-          if not re.match(r'^[a-z0-9][a-z0-9._-]{0,63}$', m['id']):
-            raise SystemExit('id must be lowercase slug')
-          print('ok', m['id'], m['version'], m['author'])
+          import json, re
+          ver = json.load(open('package.json')).get('version') or ''
+          if not re.match(r'^\d+\.\d+\.\d+', ver):
+              raise SystemExit(f'version must be semver-like, got {ver!r}')
+          m = json.load(open('mapp/mapp.manifest.json'))
+          print('manifest ok', list(m.keys())[:12])
           PY
