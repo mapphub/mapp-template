@@ -12,7 +12,7 @@ jobs:
       - name: Reject PR from main/master work branch
         id: gate
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
         run: |
           set -euo pipefail
           HEAD_REF="${{ github.event.pull_request.head.ref }}"
@@ -40,6 +40,7 @@ jobs:
         with:
           path: _template
           ref: ${{ github.event.pull_request.base.sha }}
+          token: ${{ secrets.ORG_ADMIN_TOKEN }}
 
       - name: Checkout PR head (app content)
         if: steps.gate.outputs.reject != 'true'
@@ -48,6 +49,7 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           repository: ${{ github.event.pull_request.head.repo.full_name }}
           path: _pr
+          token: ${{ secrets.ORG_ADMIN_TOKEN }}
 
       - name: Resolve identity
         if: steps.gate.outputs.reject != 'true'
@@ -87,7 +89,6 @@ jobs:
           if [ ! -f "$MAN" ]; then
             echo '{"routes":{"root":"public","app":"public","client":"public","www":"public"}}' > "$MAN"
           fi
-          # Update check URL points at this app's manifest in its own repo
           MANIFEST_URL="https://raw.githubusercontent.com/mapphub/${APP_REPO}/main/mapp/mapp.manifest.json"
           PKG_URL="https://github.com/mapphub/${APP_REPO}/releases/latest/download/app.zip"
           jq --arg a "$AUTHOR" --arg n "$NAME" --arg v "$VERSION" --arg id "$APP_ID" \
@@ -156,7 +157,6 @@ jobs:
               gh api -X POST "repos/mapphub/${APP_REPO}/pages" -f build_type=legacy -f source[branch]=gh-pages -f source[path]=/ 2>/dev/null || true
           fi
 
-          # Releases ONLY on the mini-app repository (not portal packages)
           cd /tmp/app-repo
           (cd mapp && zip -r -q ../app.zip .)
           PREV_BODY=$(gh release view latest -R "mapphub/${APP_REPO}" --json body -q .body 2>/dev/null || echo "")
@@ -176,7 +176,6 @@ jobs:
               --title "${NAME} v${VERSION}" --notes "Major ${VERSION}" 2>/dev/null || true
           fi
 
-          # Portal: catalog.json only (no zip upload, no per-app release history files)
           PKG_URL="https://github.com/mapphub/${APP_REPO}/releases/latest/download/app.zip"
           MANIFEST_URL="https://raw.githubusercontent.com/mapphub/${APP_REPO}/main/mapp/mapp.manifest.json"
           WEB_URL="https://mapphub.github.io/apps/$(echo "$APP_ID" | tr '.' '-')/"
@@ -199,12 +198,12 @@ jobs:
           git diff --cached --quiet || git commit -m "catalog: ${APP_ID}@${VERSION}"
           git push
 
-          echo "OK mapphub/${APP_REPO} ${APP_ID}@${VERSION} (releases in app repo; catalog only on portal)"
+          echo "OK mapphub/${APP_REPO} ${APP_ID}@${VERSION}"
 
       - name: Comment PR result
         if: always() && steps.gate.outputs.reject != 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
         run: |
           set -euo pipefail
           A="${{ steps.meta.outputs.author }}"
@@ -218,9 +217,9 @@ jobs:
           | Репозиторий | https://github.com/mapphub/${R} |
           | id | \`${ID}\` |
           | version | \`${V}\` |
-          | Пакет (релиз) | https://github.com/mapphub/${R}/releases/latest/download/app.zip |
-          | Манифест (обновления) | https://raw.githubusercontent.com/mapphub/${R}/main/mapp/mapp.manifest.json |
+          | Пакет | https://github.com/mapphub/${R}/releases/latest/download/app.zip |
+          | Манифест | https://raw.githubusercontent.com/mapphub/${R}/main/mapp/mapp.manifest.json |
           | Каталог | https://mapphub.github.io/catalog.json |
 
-          Релизы хранятся **только** в репозитории приложения. На портал уходит запись в catalog.json."
+          Релизы только в репозитории приложения; на портале — catalog.json."
           gh pr comment ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --body "$BODY" || true
